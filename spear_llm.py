@@ -74,6 +74,7 @@ class SoftmaxAttn(nn.Module):
         self.d, self.h = d, h
         self.qkv = nn.Linear(d, 3 * d)
         self.proj = nn.Linear(d, d)
+        self.use_sdpa = False
 
     def forward(self, x, atts=None, knorms=None):
         B, T, _ = x.shape
@@ -82,14 +83,17 @@ class SoftmaxAttn(nn.Module):
         q = q.view(B, T, self.h, hd).transpose(1, 2)
         k = k.view(B, T, self.h, hd).transpose(1, 2)
         v = v.view(B, T, self.h, hd).transpose(1, 2)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(hd))
-        mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=x.device), 1)
-        att = att.masked_fill(mask, float("-inf")).softmax(-1)
-        if atts is not None:
-            atts.append(att.detach())
-            knorms.append(k.norm(dim=-1).mean(1).detach())
-        y = (att @ v).transpose(1, 2).contiguous().view(B, T, self.d)
-        return self.proj(y)
+        if getattr(self, "use_sdpa", False) and atts is None:
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        else:
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(hd))
+            mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=x.device), 1)
+            att = att.masked_fill(mask, float("-inf")).softmax(-1)
+            if atts is not None:
+                atts.append(att.detach())
+                knorms.append(k.norm(dim=-1).mean(1).detach())
+            y = att @ v
+        return self.proj(y.transpose(1, 2).contiguous().view(B, T, self.d))
 
 
 class LinearAttn(nn.Module):
@@ -126,6 +130,50 @@ class LinearAttn(nn.Module):
         return self.proj(o.transpose(1, 2).contiguous().view(B, T, self.d))
 
 
+class DecayedLinearAttn(nn.Module):
+    """Mur A : RetNet-style decayed linear attention — recency via décroissance
+    exponentielle apprise par tête, toujours O(N) par cumsum re-scalé :
+        S_t = lam·S_{t-1} + k_t ⊗ v_t   =>   S_t = lam^t · cumsum(k⊗v / lam^j)
+    lam par tête borné [0.50,0.95] (sigmoid param) : sûr en float32 pour T<=~300.
+    """
+
+    def __init__(self, d, h, lam_lo=0.60, lam_hi=0.95):
+        super().__init__()
+        self.d, self.h = d, h
+        self.qkv = nn.Linear(d, 3 * d)
+        self.proj = nn.Linear(d, d)
+        self.eps = 1e-6
+        self.lam_lo, self.lam_hi = lam_lo, lam_hi
+        init = torch.linspace(lam_lo + 0.08, lam_hi - 0.02, h)
+        u = (init - lam_lo) / (lam_hi - lam_lo)
+        self.lam_logit = nn.Parameter(torch.log(u / (1 - u)))
+
+    def forward(self, x, atts=None, knorms=None):
+        B, T, _ = x.shape
+        q, k, v = self.qkv(x).split(self.d, dim=2)
+        hd = self.d // self.h
+        q = q.view(B, T, self.h, hd).transpose(1, 2)       # (B,h,T,hd)
+        k = k.view(B, T, self.h, hd).transpose(1, 2)
+        v = v.view(B, T, self.h, hd).transpose(1, 2)
+        # interne float64 : lam^-j atteint ~1e20+, float32 deborde en backward
+        dt = torch.float64
+        lam = (torch.sigmoid(self.lam_logit.double()) * (self.lam_hi - self.lam_lo)
+               + self.lam_lo)                              # (h,)
+        pos = torch.arange(T, device=x.device, dtype=dt)
+        lpow = lam[:, None] ** pos[None, :]                # (h,T) = lam^t
+        inv = 1.0 / lpow                                   # lam^-j
+        qd, kd, vd = q.to(dt), k.to(dt), v.to(dt)
+        ks = kd * inv.unsqueeze(0).unsqueeze(-1)
+        outer = ks.unsqueeze(-1) * vd.unsqueeze(-2)        # (B,h,T,hd,hd)
+        kv = torch.cumsum(outer, dim=2) * lpow.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        kc = torch.cumsum(ks, dim=2) * lpow.unsqueeze(0).unsqueeze(-1)
+        o = (kv @ qd.unsqueeze(-1)).squeeze(-1)            # (B,h,T,hd)
+        den = (qd * kc).sum(dim=-1, keepdim=True)
+        o = o / (den + self.eps)
+        o = o.to(v.dtype)
+        return self.proj(o.transpose(1, 2).contiguous().view(B, T, self.d))
+
+
 class Block(nn.Module):
     def __init__(self, d, h, act, kind="softmax"):
         super().__init__()
@@ -134,6 +182,8 @@ class Block(nn.Module):
             self.attn = SoftmaxAttn(d, h)
         elif kind == "linearraw":
             self.attn = LinearAttn(d, h, normalize=False)
+        elif kind == "decayed":
+            self.attn = DecayedLinearAttn(d, h)
         else:
             self.attn = LinearAttn(d, h, normalize=True)
         self.fc1 = nn.Linear(d, 4 * d)
@@ -143,6 +193,53 @@ class Block(nn.Module):
     def forward(self, x, atts=None, knorms=None):
         x = x + self.attn(self.ln1(x), atts, knorms)
         return x + self.fc2(self.act(self.fc1(self.ln2(x))))
+
+
+class TernaryLinear(nn.Linear):
+    """Mur B : poids ternaires {-g,0,+g} (absmean BitNet-style) entraînés via STE.
+    Forward quantifié, backward identité -> le réseau APPREND dans le régime ternaire.
+    Mémoire packée théorique : 2 bits/poids vs 32."""
+
+    def forward(self, x):
+        w = self.weight
+        gamma = w.abs().mean().detach().clamp_min(1e-8)
+        w_q = torch.clamp(torch.round(w / gamma), -1.0, 1.0) * gamma
+        return F.linear(x, w_q + (w - w.detach()), self.bias)
+
+
+def to_ternary_(mod, skip=("head",)):
+    """Remplace récursivement les nn.Linear (sauf skip) par des TernaryLinear."""
+    for name, child in mod.named_children():
+        if name in skip:
+            continue
+        if isinstance(child, nn.Linear):
+            new = TernaryLinear(child.in_features, child.out_features,
+                                bias=child.bias is not None)
+            with torch.no_grad():
+                new.weight.copy_(child.weight)
+                if child.bias is not None:
+                    new.bias.copy_(child.bias)
+            setattr(mod, name, new)
+        else:
+            to_ternary_(child, skip)
+
+
+def packed_bytes_kb(m):
+    """Taille packée : 2 bits/poids pour les TernaryLinear, fp32 pour le reste."""
+    seen, lin_bytes = set(), 0.0
+    for mod in m.modules():
+        if isinstance(mod, TernaryLinear):
+            p = mod.weight.data_ptr()
+            if p not in seen:
+                seen.add(p)
+                lin_bytes += mod.weight.numel() * 0.25
+    other = 0.0
+    for _, t in m.state_dict().items():
+        p = t.data_ptr()
+        if p not in seen:
+            seen.add(p)
+            other += t.numel() * t.element_size()
+    return (lin_bytes + other) / 1024.0
 
 
 class GPT(nn.Module):
@@ -230,6 +327,12 @@ def cmd_train(a):
     torch.manual_seed(a.seed)
     np.random.seed(a.seed)
     m = GPT(V, d, nl, h, T, act, attn=a.attn)
+    if not getattr(a, "nosdpa", False):
+        for blk in m.blocks:
+            if hasattr(blk.attn, "use_sdpa"):
+                blk.attn.use_sdpa = True
+    if getattr(a, "ternary", False):
+        to_ternary_(m)
     nparam = sum(p.numel() for p in m.parameters())
     opt = torch.optim.AdamW(m.parameters(), lr=3e-3, betas=(0.9, 0.95), weight_decay=0.01)
     warm = max(10, a.steps // 20)
@@ -247,7 +350,11 @@ def cmd_train(a):
             g["lr"] = lr_at(s)
         x, y = get_batch(tr, B, T)
         _, loss = m(x, y)
-        opt.zero_grad()
+        if not torch.isfinite(loss):
+            opt.zero_grad(set_to_none=True)
+            print(f"step {s+1}: loss non-fini -> step ignore", flush=True)
+            continue
+        opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
         opt.step()
@@ -259,8 +366,12 @@ def cmd_train(a):
     sec = time.time() - t0
     os.makedirs(OUT, exist_ok=True)
     tag = a.act if a.attn == "softmax" and a.seed == 1337 else f"{a.act}_{a.attn}_s{a.seed}"
+    if getattr(a, "ternary", False):
+        tag += "_tern"
     if a.d != 96 or a.nl != 3:
         tag += f"_d{a.d}n{a.nl}"
+    if getattr(a, "ternary", False):
+        print(f"packed memory (2-bit ternary linears): {packed_bytes_kb(m):.1f} KB")
     torch.save({"model": m.state_dict(), "cfg": dict(vocab=V, d=d, nl=nl, h=h, T=T),
                 "act": a.act, "attn": a.attn, "seed": a.seed, "val": vl,
                 "steps": a.steps, "sec": sec, "params": nparam},
@@ -367,7 +478,11 @@ def main():
     t = sub.add_parser("train")
     t.add_argument("--act", required=True,
                    choices=["silu", "gelu", "spear_silu", "spear_gelu", "spear_gelu2"])
-    t.add_argument("--attn", default="softmax", choices=["softmax", "linear", "linearraw", "hybrid"])
+    t.add_argument("--attn", default="softmax",
+                   choices=["softmax", "linear", "linearraw", "hybrid", "decayed"])
+    t.add_argument("--ternary", action="store_true")
+    t.add_argument("--no-sdpa", action="store_true", dest="nosdpa",
+                   help="attention manuelle au lieu du kernel fusé SDPA")
     t.add_argument("--seed", type=int, default=1337)
     t.add_argument("--steps", type=int, default=500)
     t.add_argument("--d", type=int, default=96)

@@ -39,6 +39,8 @@ Classés par ampleur mesurée sur machine réelle (CPU 4 cœurs, PyTorch 2.9 CPU
 | 4 | **Φ(x) CDF purement algébrique** | L∞ **3.7e-3** sur [-4,4], zéro `erf` | scoring statistique embarqué |
 | 5 | **Moniteur de drift W1** | 0 fausse alarme · détection en 1 batch après injection · seuil auto-calibré | MLOps temps réel |
 | 6 | int8 dynamique | mémoire **÷2.6–3.2**, qualité intacte (+0.0006 val loss) | stockage/edge (latence CPU : voir §5.4) |
+| 7 | **SDPA fusé** | entraînement **×4.22** (441 vs 1863 ms/step), identique à 6e-7 | tout training softmax-attention |
+| 8 | **Ternaire natif STE** | val +0.125 seulement vs fp32, mémoire ÷5.7 — le post-training échouait, l'entraînement dedans passe | edge/stockage extrême |
 
 ## 2. Falsifications
 
@@ -139,8 +141,25 @@ d'activations, −2.6 % end-to-end), attention softmax 38.4k vs linéaire ~31.7k
 | 0.35M | **GELU rationnel √** | **2.9753** | **19.59** |
 | 0.11M (d64·L2) | F.silu | 3.0309 | 20.72 |
 | 0.11M | **SiLU algébrique** | **3.0122** | **20.33** |
+| 0.35M | **Ternaire STE natif** (`--ternary`) | **3.1370** | 23.03 |
+| 0.35M | attention hybride softmax/linéaire | 3.1208 | 22.67 |
+| 0.35M | attention linéaire + décroissance RetNet | 3.3471 ❌ | 28.42 |
 
 → Les formes sans transcendante s'entraînent aussi bien que les exactes, aux deux échelles.
+→ Le ternaire entraîné nativement (STE absmean) tient à +0.125 du fp32 — mémoire packée ÷5.7.
+
+### Vitesse d'entraînement
+
+`F.scaled_dot_product_attention` (kernel fusé causal) vs attention manuelle, même modèle :
+
+| Chemin | ms/step | gain |
+|---|---|---|
+| manuel fp32 | 1863 | ×1 |
+| **SDPA fp32** | **441** | **×4.22** |
+| bf16 autocast | abandonné | pas de bf16 natif sur ce CPU |
+
+Écart logits manuel↔SDPA à poids identiques : 6e-7. SDPA est **activé par défaut** dans
+`spear_llm.py train` (`--no-sdpa` pour l'ancien chemin).
 
 ### 5.3 Attention softmax vs linéaire (fwd+bwd)
 
@@ -194,8 +213,10 @@ vit dans [`loop_state.json`](loop_state.json).
 
 - Modèles char-level de démonstration : ppl 19–21 = semi-charabia. Ce sont des **bancs de preuve**, pas des générateurs.
 - Pas de gain latence des activations en torch eager (win réel : JS ×2.96 mesuré, kernels custom, MCU).
-- Attention linéaire : perf long-T seulement ; qualité courte-T non résolue (piste : hybride decay/window).
-- Ternaire : nécessite QAT, non traité.
+- Attention linéaire pure : qualité courte-T non résolue — décroissance RetNet-style sans effet (3.347) ;
+  l'hybride alterné récupère ~60 % de l'écart (3.121). Piste restante : delta-rule / chunk-wise.
+- Ternaire : OK entraîné nativement (STE), rejeté en post-training seul.
+- bf16 autocast : sans intérêt sur CPU sans support natif (émulation ×20 plus lente).
 - Mono-seed, CPU-only pour l'entraînement.
 
 ## 8. Layout

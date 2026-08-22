@@ -19,7 +19,11 @@
     {"n": 10, "depth": "L3", "work": "bench_light int8/ternaire/cost-model : int8 mem x2.62-3.17 mais latence x0.61-0.84 PLUS LENT (négatif honnête) ; ternaire sans QAT qualité détruite (+0.50/+0.80) REJETE ; acts -56% op-level / -2.6% end-to-end"},
     {"n": 11, "depth": "L4", "work": "BT11 W1 exact D=256 : x28 vs scipy (accord 2.4e-14) ; sinkhorn log-domain 57.7s pour 76% faux -> x642000"},
     {"n": 12, "depth": "L4", "work": "corpus portable : header C99 (gcc -pedantic) + audit C<->Python PASS ; JS testé node ; drift monitor live (0 fausse alarme, detection 4 ticks, x6.9 vs scipy)",
-     "gaps": ["G-FACT#4 phi etait fitte contre la sigmoide logistique au lieu de la CDF gaussienne - attrape par l'audit C, corrige : Linf 3.7e-3 sur [-4,4] (bug clip sur marche impaire au lieu de la sortie)"]}
+     "gaps": ["G-FACT#4 phi etait fitte contre la sigmoide logistique au lieu de la CDF gaussienne - attrape par l'audit C, corrige : Linf 3.7e-3 sur [-4,4] (bug clip sur marche impaire au lieu de la sortie)"]},
+    {"n": 13, "depth": "L3", "work": "MUR B CASSE : TernaryLinear STE absmean entraîne DEPUIS LE DÉBUT en régime ternaire -> val 3.137 vs critère <=3.20 PASS (fp32 ref 3.0122, écart +0.125) ; packé 79KB /5.7 (embeddings fp32 dominent, /8 était optimiste)"},
+    {"n": 14, "depth": "L4", "work": "MUR A tentative decay (RetNet-style) : NaN float32 en backward (lam^-j ~e69) -> fix interne float64 + garde skip-step ; val 3.347 = échec, la décroissance ne règle pas le déficit de netteté du linéaire court-T"},
+    {"n": 15, "depth": "L3", "work": "BREAKTHROUGH VITESSE : F.scaled_dot_product_attention fusé = x4.22 (1863->441 ms/step), logits identiques à 6e-7 ; bf16 abandonné (pas de support natif CPU, 9.4s/step) ; SDPA par défaut dans train (--no-sdpa pour l'ancien chemin)"},
+    {"n": 16, "depth": "L3", "work": "MUR A tentative hybride (softmax/linéaire alternés, pattern Jamba) : val 3.121 - récupère ~60% de l'écart mais critère <=3.05 raté -> MUR PARTIELLEMENT CASSÉ, O(N) pur court-T reste ouvert"}
   ],
   "bugs_fixed": [
     "dims codées en dur ignoraient --d/--nl (relance involontaire d=96 = preuve déterminisme bonus)",
@@ -45,7 +49,11 @@
     "int8_dynamic": "MEMOIRE x2.6-3.2 et qualité intacte (+0.0006 au d96) MAIS latence CPU x0.61-0.84 - négatif honnête",
     "ternary_absmean": "REJETE sans QAT (+0.5/+0.8 val loss)",
     "w1_exact_vs_scipy": "x28 (accord machine)",
-    "w1_exact_vs_sinkhorn": "x642000 ET le solveur reste faux à 76%"
+    "w1_exact_vs_sinkhorn": "x642000 ET le solveur reste faux à 76%",
+    "ternary_ste_training": "VALIDE (mur B cassé) - entraîné nativement en ternaire : val 3.137 (+0.125 vs fp32), mémoire packée /5.7",
+    "linear_attention_decayed": "ÉCHEC documenté - décroissance RetNet-style sans effet sur la qualité courte-T (3.347)",
+    "sdpa_fused_attention": "VALIDE - x4.22 vitesse d'entraînement, numériquement identique au manuel",
+    "linear_attention_hybrid": "PARTIEL - val 3.121, ~60% de l'écart récupéré au même budget"
   },
   "convergence": "PROVISIONAL - tous les gaps typés résolus ou documentés comme limites honnêtes ; murs restants : qualité attention linéaire courte-T, ternaire nécessite QAT"
 }
