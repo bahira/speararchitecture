@@ -39,7 +39,7 @@ Classés par ampleur mesurée sur machine réelle (CPU 4 cœurs, PyTorch 2.9 CPU
 | 4 | **Φ(x) CDF purement algébrique** | L∞ **3.7e-3** sur [-4,4], zéro `erf` | scoring statistique embarqué |
 | 5 | **Moniteur de drift W1** | 0 fausse alarme · détection en 1 batch après injection · seuil auto-calibré | MLOps temps réel |
 | 6 | int8 dynamique | mémoire **÷2.6–3.2**, qualité intacte (+0.0006 val loss) | stockage/edge (latence CPU : voir §5.4) |
-| 7 | **SDPA fusé** | entraînement **×4.22** (441 vs 1863 ms/step), identique à 6e-7 | tout training softmax-attention |
+| 7 | **SDPA fusé** | entraînement **×1.37** en médiane entrelacée, identique à 6e-7 | tout training softmax-attention |
 | 8 | **Ternaire natif STE** | val +0.125 seulement vs fp32, mémoire ÷5.7 — le post-training échouait, l'entraînement dedans passe | edge/stockage extrême |
 
 ## 2. Falsifications
@@ -150,16 +150,18 @@ d'activations, −2.6 % end-to-end), attention softmax 38.4k vs linéaire ~31.7k
 
 ### Vitesse d'entraînement
 
-`F.scaled_dot_product_attention` (kernel fusé causal) vs attention manuelle, même modèle :
+`F.scaled_dot_product_attention` (kernel fusé causal) vs attention manuelle — **mesure entrelacée**
+(alternance round par round pour neutraliser la dérive de charge de la machine ; 6 rounds × 5 steps) :
 
-| Chemin | ms/step | gain |
+| Chemin | médiane ms/step | gain |
 |---|---|---|
-| manuel fp32 | 1863 | ×1 |
-| **SDPA fp32** | **441** | **×4.22** |
-| bf16 autocast | abandonné | pas de bf16 natif sur ce CPU |
+| manuel fp32 | 1254 | ×1 |
+| **SDPA fp32** | **918** | **×1.37** |
 
-Écart logits manuel↔SDPA à poids identiques : 6e-7. SDPA est **activé par défaut** dans
-`spear_llm.py train` (`--no-sdpa` pour l'ancien chemin).
+Une première mesure non-entrelacée avait donné ×4.22 dans une fenêtre calme — la variance de cette
+machine (×4 entre rounds !) impose l'entrelacement. SDPA reste gagnant en médiane (4/6 rounds) et
+numériquement identique (6e-7). Activé par défaut dans `spear_llm.py train` (`--no-sdpa` sinon).
+bf16 autocast : abandonné (émulation logicielle, ~×20 plus lent).
 
 ### 5.3 Attention softmax vs linéaire (fwd+bwd)
 
