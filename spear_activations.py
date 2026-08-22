@@ -59,6 +59,17 @@ def phi(t):
                        min=0.0, max=1.0)
 
 
+def softsign(t):
+    """Gate borné (-1,1) EXACT, 6 unités ALU, zéro transcendance (HoF 'sigmoid fast').
+    Honnête : c'est softsign exact — une primitive de gating, pas un sigmoid."""
+    return t / (1.0 + torch.abs(t))
+
+
+class SpearSoftsign(nn.Module):
+    def forward(self, x):
+        return softsign(x)
+
+
 class SpearSiLU(nn.Module):
     def forward(self, x):
         return silu(x)

@@ -40,6 +40,11 @@ const SPEAR = {
     return 1 - 1 / (1 + Math.exp(-x));
   },
 
+  /* Softsign exact x/(1+|x|) : gate borne, 6 unites ALU (HoF 'sigmoid fast') */
+  softsign(x) {
+    return x / (1 + Math.abs(x));
+  },
+
   /* Tanh Padé[3/2], Linf 1.4e-5 sur [-1,1], sature au-dela */
   tanhIndomain(x) {
     const x2 = x * x;

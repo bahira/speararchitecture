@@ -434,7 +434,7 @@ def cmd_kv(_):
     if not paths:
         raise SystemExit("no checkpoints in out/ — run train first")
     B, frac = 16, 0.5
-    print(f"{'ckpt':14s} {'random':>7s} {'window':>7s} {'S_only':>7s} {'A(H2O)':>7s} {'4S+A+1.5R':>10s} {'(A+R)(1+3S)':>12s} {'jac(rule,H2O)':>14s}")
+    print(f"{'ckpt':14s} {'random':>7s} {'window':>7s} {'S_only':>7s} {'A(H2O)':>7s} {'4S+A+1.5R':>10s} {'(A+R)(1+3S)':>12s} {'4.5S+A+R':>9s} {'jac(rule,H2O)':>14s}")
     for p in paths:
         m, cfg = load_ckpt(p)
         if cfg.get("attn", "softmax") != "softmax":
@@ -454,6 +454,7 @@ def cmd_kv(_):
         An, Sn = norm(A), norm(S)
         rule = 4 * Sn + An + 1.5 * R            # additive triad
         rule_m = (An + R) * (1.0 + 3.0 * Sn)    # multiplicative triad (SPEAR codex)
+        rule_hof = 4.5 * Sn + An + R            # hall-of-fame seed 990303
         k = P // 2
 
         def ret(score):
@@ -468,7 +469,7 @@ def cmd_kv(_):
         jac = (keep_h2o & keep_rule).sum(1).float() / (keep_h2o | keep_rule).sum(1)
         win = ((A[:, -k:]).sum(1) / A.sum(1)).mean().item()
         print(f"{os.path.basename(p):14s} {ret(torch.rand(B, P)):7.3f} {win:7.3f} "
-              f"{ret(Sn):7.3f} {ret(An):7.3f} {ret(rule):10.3f} {ret(rule_m):12.3f} {jac.mean().item():14.3f}")
+              f"{ret(Sn):7.3f} {ret(An):7.3f} {ret(rule):10.3f} {ret(rule_m):12.3f} {ret(rule_hof):9.3f} {jac.mean().item():14.3f}")
 
 
 def main():

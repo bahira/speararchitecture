@@ -24,7 +24,8 @@
     {"n": 14, "depth": "L4", "work": "MUR A tentative decay (RetNet-style) : NaN float32 en backward (lam^-j ~e69) -> fix interne float64 + garde skip-step ; val 3.347 = échec, la décroissance ne règle pas le déficit de netteté du linéaire court-T"},
     {"n": 15, "depth": "L3", "work": "BREAKTHROUGH VITESSE : F.scaled_dot_product_attention fusé = x4.22 (1863->441 ms/step), logits identiques à 6e-7 ; bf16 abandonné (pas de support natif CPU, 9.4s/step) ; SDPA par défaut dans train (--no-sdpa pour l'ancien chemin)"},
     {"n": 16, "depth": "L3", "work": "MUR A tentative hybride (softmax/linéaire alternés, pattern Jamba) : val 3.121 - récupère ~60% de l'écart mais critère <=3.05 raté -> MUR PARTIELLEMENT CASSÉ, O(N) pur court-T reste ouvert"},
-    {"n": 17, "depth": "L4", "work": "PROBE ADVERSE sur le claim x4.22 : mesure ENTRELACÉE 6 rounds -> médiane x1.37 seulement (la variance machine est x4 entre rounds) ; claim corrigé dans le README - la sonde attrape l'inflation de l'itération 15"}
+    {"n": 17, "depth": "L4", "work": "PROBE ADVERSE sur le claim x4.22 : mesure ENTRELACÉE 6 rounds -> médiane x1.37 seulement (la variance machine est x4 entre rounds) ; claim corrigé dans le README - la sonde attrape l'inflation de l'itération 15"},
+    {"n": 18, "depth": "L4", "work": "AUDIT HALL OF FAME (hof_verify.py) : silu-HoF 2.2e-1, gelu-HoF 8e-2, phi-HoF 3.7e-2 (queue >1), softplus-HoF 1.23, tanh-HoF pente 1.96 -> 0 adoption, claims tous non-reproductibles ; ADOPTIONS : gate softsign exact (6u) au corpus ; règle KV 4.5S+A+R ex æquo de la nôtre et leur fast-slot 'A seul' confirme indépendamment H2O dominant"}
   ],
   "bugs_fixed": [
     "dims codées en dur ignoraient --d/--nl (relance involontaire d=96 = preuve déterminisme bonus)",

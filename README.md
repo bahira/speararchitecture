@@ -59,6 +59,24 @@ Tout ce qui a été testé et **rejeté**, avec la preuve :
 La boucle a aussi attrapé son propre bug : une première version de Φ fittée contre la sigmoïde
 logistique au lieu de la vraie CDF — détecté par l'audit croisé C↔Python, corrigé.
 
+### Audit du Hall of Fame officiel (`hof_verify.py`)
+
+Les formules championnes du registre SPEAR (`spear-hall-of-fame.json`) passent le même banc :
+
+| Entrée | Err mesurée | Claim | Verdict |
+|---|---|---|---|
+| SiLU affine-corrigée | 2.23e-1 | 7.8e-4 | ❌ pire que nos constantes (4.0e-2) |
+| GELU lin-cap corrigée | 8.0e-2 | 5.3e-4 | ❌ notre famille rationnelle gagne |
+| Φ x/max() 9 unités | 3.7e-2 (queue sature à 1.0435 > 1) | 1.4e-4 | ❌ notre Φ gagne sur [-4,4] (10×) |
+| Softplus min/max « sans exp » | **1.23** | 2.3e-4 | ❌ export cassé |
+| Tanh Padé « raffinée » | 3.1e-1 (pente ×1.96 en 0 !) | 1.6e-4 | ❌ nos constantes restent championnes |
+| Règle KV `4.5S+A+R` | quasi-ex æquo de la nôtre (4/5 ckpts) | 69.98 % | ⚖️ tie — et leur fast slot (`A` seul) confirme H2O dominant |
+
+**Adoption nette** : le gate **softsign exact** `x/(1+|x|)` (6 unités ALU, borné, zéro
+transcendance) rejoint le corpus comme primitive de gating — documenté comme softsign exact,
+pas comme remplaçant de sigmoid. Deux campagnes de recherche indépendantes convergeant sur
+« l'attention seule domine toutes les triades » est le résultat le plus solide de cet audit.
+
 ## 3. Quickstart
 
 ```bash
@@ -124,6 +142,7 @@ Tous les chiffres ci-dessous ont été produits sur la machine de développement
 | `spear_softplus` | log(1+eˣ) | **1.70e-4** | [-6,6] | 42 → 32 |
 | `spear_phi` | Φ(x)=½(1+erf(x/√2)) | **3.65e-3** | [-4,4] (clamp global ≤4.4e-2) | erf(~27) → 11 |
 | `spear_tanh` | tanh(x) | **1.44e-5** | [-1,1] strict | 21 → 9 |
+| `spear_softsign` | x/(1+\|x\|) | exacte (gate borné) | partout | 34 → 6 |
 | `spear_exact_wasserstein1` | scipy | **2.4e-14 rel.** | partout | itératif → O(n) |
 
 Unités ALU du modèle de coût : mul/add=1, div=4, sqrt=2, exp/log≈20.
