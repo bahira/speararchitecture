@@ -1,0 +1,51 @@
+{
+  "task": "GROUNDED-SPEAR -> LLM multimodal hyper-leger sur tiny_shakespeare : falsification des formules, refits, entraînement parité, benchmarks BIG SPEEDUP",
+  "task_type": "code_generation",
+  "min_depth": "L3",
+  "budget": "500 steps/bras (respecté)",
+  "iterations": [
+    {"n": 1, "depth": "L3", "work": "falsification formules publiées (spear_ops.py)",
+     "gaps": ["G-FACT#1 SiLU pub 0.25 (claim 8.2e-4)", "G-FACT#2 beta exp-cos 0% valide", "G-SPEC#1 softplus constantes manquantes -> refit 1.7e-4", "G-PERF#1 eager spear plus lent que fused ATen"]},
+    {"n": 2, "depth": "L3", "work": "refits enrichis + minimax 500 iters",
+     "gaps": ["silu 4-param plafond structurel 4.0e-2", "gelu quad-shoulder 6.9e-2", "torch.compile KO Windows (pas de cl)"]},
+    {"n": 3, "depth": "L3", "work": "diagnostic perf train",
+     "gaps": ["G-PERF#2 >6s/step -> downsizing d=96/nl=3 ~2 it/s"]},
+    {"n": 4, "depth": "L3", "work": "runs 500 steps d=96 : silu 2.9873 vs spear_silu 2.9584 PARITE ; gelu 3.0128 vs spear_gelu lin-cap 3.2342 MUR"},
+    {"n": 5, "depth": "L3", "work": "formules raffinées codex : beta_new != cosine (0.96) REJETE ; blur_new = gaussienne vraie (1.6e-3) VALIDE ; Phi rationnel decouvert 9.8e-3 ; GELU rational-sqrt 5.1e-2"},
+    {"n": 6, "depth": "L3", "work": "spear_gelu2 entraine : 2.9753/19.59 -> MUR CASSE, parité restaurée"},
+    {"n": 7, "depth": "L3", "work": "BT13 attention lineaire O(N) Cauchy-Schwarz : crossover T~1024, x1.91@4096 (hd24), x3.73@4096 / x8.46@8192 (hd16) ; qualité T=128 dégradée (~3.35) MUR NON RESOLU"},
+    {"n": 8, "depth": "L3", "work": "KV-cache 50% éviction : H2O 0.64-0.75 | additif 4S+A+1.5R 0.60-0.69 | multiplicatif (A+R)(1+3S) 0.58-0.67 | random ~0.50 | window ~0.40 -> règle ~ claim 67% du paper mais PAS > H2O"},
+    {"n": 9, "depth": "L3", "work": "ultra-léger d=64/nl=2 (0.11M) : silu 3.0309 vs spear_silu 3.0122 PARITE tiny-scale"},
+    {"n": 10, "depth": "L3", "work": "bench_light int8/ternaire/cost-model : int8 mem x2.62-3.17 mais latence x0.61-0.84 PLUS LENT (négatif honnête) ; ternaire sans QAT qualité détruite (+0.50/+0.80) REJETE ; acts -56% op-level / -2.6% end-to-end"},
+    {"n": 11, "depth": "L4", "work": "BT11 W1 exact D=256 : x28 vs scipy (accord 2.4e-14) ; sinkhorn log-domain 57.7s pour 76% faux -> x642000"},
+    {"n": 12, "depth": "L4", "work": "corpus portable : header C99 (gcc -pedantic) + audit C<->Python PASS ; JS testé node ; drift monitor live (0 fausse alarme, detection 4 ticks, x6.9 vs scipy)",
+     "gaps": ["G-FACT#4 phi etait fitte contre la sigmoide logistique au lieu de la CDF gaussienne - attrape par l'audit C, corrige : Linf 3.7e-3 sur [-4,4] (bug clip sur marche impaire au lieu de la sortie)"]}
+  ],
+  "bugs_fixed": [
+    "dims codées en dur ignoraient --d/--nl (relance involontaire d=96 = preuve déterminisme bonus)",
+    "remap clés vieux ckpts blocks.i.qkv -> blocks.i.attn.qkv",
+    "double comptage poids liés head/wte dans taille packée ternaire",
+    "sinkhorn coût au carré au lieu de |i-j| + diagnostic eps (couplage indépendant à grand eps)"
+  ],
+  "training_ledger_500steps_seed1337": {
+    "d96nl3_0.35M": {"silu": 2.9873, "spear_silu": 2.9584, "gelu": 3.0128, "spear_gelu_lincap": 3.2342, "spear_gelu2_rational": 2.9753},
+    "d64nl2_0.11M": {"silu": 3.0309, "spear_silu": 3.0122}
+  },
+  "verdicts": {
+    "spear_silu_rational": "VALIDE - parité entraînement aux 2 échelles, 12 unités ALU vs 27 (x2.25 op-level)",
+    "spear_gelu_linear_cap": "REJETE - dégrade l'entraînement",
+    "spear_gelu2_rational_sqrt": "VALIDE - découvert dans la boucle, parité restaurée",
+    "softplus_pade22": "VALIDE - L∞ 1.7e-4",
+    "phi_rational": "VALIDE apres correction G-FACT#4 (fit contre vraie CDF, clamp sortie) - Linf 3.7e-3 [-4,4], 4.4e-2 global",
+    "tanh_pade32": "VALIDE in-domain [-1,1] uniquement après refit (pub faux)",
+    "blur_refined": "VALIDE - c'est la gaussienne elle-même",
+    "beta_both_forms": "REJETES - invalide / pas le schedule cosine",
+    "linear_attention_BT13": "PERF VALIDEE long-T seulement (x1.9-8.5 à 4k-8k) ; qualité courte-T mur non résolu",
+    "kv_rules": "PARTIEL - atteignent le claim ~67% du paper, pas supérieures à H2O pur",
+    "int8_dynamic": "MEMOIRE x2.6-3.2 et qualité intacte (+0.0006 au d96) MAIS latence CPU x0.61-0.84 - négatif honnête",
+    "ternary_absmean": "REJETE sans QAT (+0.5/+0.8 val loss)",
+    "w1_exact_vs_scipy": "x28 (accord machine)",
+    "w1_exact_vs_sinkhorn": "x642000 ET le solveur reste faux à 76%"
+  },
+  "convergence": "PROVISIONAL - tous les gaps typés résolus ou documentés comme limites honnêtes ; murs restants : qualité attention linéaire courte-T, ternaire nécessite QAT"
+}

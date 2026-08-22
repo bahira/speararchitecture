@@ -1,0 +1,8 @@
+# artifacts locaux / regenerables
+__pycache__/
+*.pyc
+*.pt
+tiny_shakespeare.txt
+*.exe
+_tmp_state.pt
+out/
