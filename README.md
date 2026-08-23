@@ -163,8 +163,12 @@ d'activations, −2.6 % end-to-end), attention softmax 38.4k vs linéaire ~31.7k
 | 0.35M | **Ternaire STE natif** (`--ternary`) | **3.1370** | 23.03 |
 | 0.35M | attention hybride softmax/linéaire | 3.1208 | 22.67 |
 | 0.35M | attention linéaire + décroissance RetNet | 3.3471 ❌ | 28.42 |
+| 0.35M, seed 1338 | F.silu | 3.0811 | 21.78 |
+| 0.35M, seed 1338 | **SiLU algébrique** | **2.9626** | **19.35** |
+| 0.35M | attention delta-rule (DeltaNet-style) | 3.3460 ❌ | 28.39 |
 
-→ Les formes sans transcendante s'entraînent aussi bien que les exactes, aux deux échelles.
+→ Les formes sans transcendante s'entraînent aussi bien que les exactes — et **gagnent sur les
+2 seeds indépendantes testées** (Δ +0.029 puis +0.119). Claim robustifié, pas mono-seed.
 → Le ternaire entraîné nativement (STE absmean) tient à +0.125 du fp32 — mémoire packée ÷5.7.
 
 ### Vitesse d'entraînement
@@ -234,11 +238,12 @@ vit dans [`loop_state.json`](loop_state.json).
 
 - Modèles char-level de démonstration : ppl 19–21 = semi-charabia. Ce sont des **bancs de preuve**, pas des générateurs.
 - Pas de gain latence des activations en torch eager (win réel : JS ×2.96 mesuré, kernels custom, MCU).
-- Attention linéaire pure : qualité courte-T non résolue — décroissance RetNet-style sans effet (3.347) ;
-  l'hybride alterné récupère ~60 % de l'écart (3.121). Piste restante : delta-rule / chunk-wise.
+- Attention linéaire pure : qualité courte-T non résolue — décroissance RetNet-style sans effet (3.347),
+  delta-rule (DeltaNet-style) stable après normalisation des clés mais sans gain (3.346) ;
+  l'hybride alterné récupère ~60 % de l'écart (3.121). Piste restante : chunkwise-parallel + échelle.
 - Ternaire : OK entraîné nativement (STE), rejeté en post-training seul.
 - bf16 autocast : sans intérêt sur CPU sans support natif (émulation ×20 plus lente).
-- Mono-seed, CPU-only pour l'entraînement.
+- Entraînement validé sur 2 seeds pour le claim principal ; le reste est mono-seed.
 
 ## 8. Layout
 

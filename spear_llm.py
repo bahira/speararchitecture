@@ -174,6 +174,46 @@ class DecayedLinearAttn(nn.Module):
         return self.proj(o.transpose(1, 2).contiguous().view(B, T, self.d))
 
 
+class DeltaRuleAttn(nn.Module):
+    """Mur A, tentative 4 : attention delta-rule (DeltaNet-style).
+    Mémoire associative S par tête corrigée d'erreur à chaque token :
+        S_t = S_{t-1} + beta·(v_t - S_{t-1} k_t) k_tᵀ     o_t = S_t q_t
+    Contrairement au cumsum moyen du linéaire, elle STOCKE précisément
+    (rappel associatif net) tout en restant O(N) et sans division instable.
+    Scan séquentiel exact ; beta appris par tête via sigmoid (0..1)."""
+
+    def __init__(self, d, h):
+        super().__init__()
+        self.d, self.h = d, h
+        self.qkv = nn.Linear(d, 3 * d)
+        self.proj = nn.Linear(d, d)
+        init_b = torch.linspace(0.50, 0.80, h)
+        self.beta_logit = nn.Parameter(torch.log(init_b / (1 - init_b)))
+        self.scale = 1.0 / math.sqrt(d // h)
+
+    def forward(self, x, atts=None, knorms=None):
+        B, T, _ = x.shape
+        q, k, v = self.qkv(x).split(self.d, dim=2)
+        hd = self.d // self.h
+        q = q.view(B, T, self.h, hd).transpose(1, 2) * self.scale
+        k = k.view(B, T, self.h, hd).transpose(1, 2)
+        v = v.view(B, T, self.h, hd).transpose(1, 2)
+        # clés unitaires : borne la dynamique de S (sinon feedback explosif)
+        k = k / (k.norm(dim=-1, keepdim=True) + 1e-6)
+        beta = torch.sigmoid(self.beta_logit)              # (h,)
+        S = torch.zeros(B, self.h, hd, hd, device=x.device, dtype=x.dtype)
+        outs = []
+        for t in range(T):                                 # scan causal exact
+            kt = k[:, :, t].unsqueeze(-1)                  # (B,h,hd,1)
+            vt = v[:, :, t].unsqueeze(-1)
+            pred = S @ kt                                  # rappel courant
+            S = S + beta.view(1, -1, 1, 1) * (vt - pred) * kt.transpose(-2, -1)
+            outs.append(S @ q[:, :, t].unsqueeze(-1))      # (B,h,hd,1)
+        o = torch.cat(outs, dim=-1)                        # (B,h,hd,T)
+        o = o.permute(0, 1, 3, 2).contiguous().view(B, T, self.d)
+        return self.proj(o)
+
+
 class Block(nn.Module):
     def __init__(self, d, h, act, kind="softmax"):
         super().__init__()
@@ -184,6 +224,8 @@ class Block(nn.Module):
             self.attn = LinearAttn(d, h, normalize=False)
         elif kind == "decayed":
             self.attn = DecayedLinearAttn(d, h)
+        elif kind == "delta":
+            self.attn = DeltaRuleAttn(d, h)
         else:
             self.attn = LinearAttn(d, h, normalize=True)
         self.fc1 = nn.Linear(d, 4 * d)
@@ -323,7 +365,7 @@ def cmd_train(a):
     tr, va, V, itos = load_data()
     act = make_acts(consts())[a.act]
     d, nl, h, T, B = a.d, a.nl, 4, 128, 16
-    torch.set_num_threads(4)
+    torch.set_num_threads(int(os.environ.get("SPEAR_THREADS", "4")))
     torch.manual_seed(a.seed)
     np.random.seed(a.seed)
     m = GPT(V, d, nl, h, T, act, attn=a.attn)
@@ -356,6 +398,11 @@ def cmd_train(a):
             continue
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        bad_grad = any(p.grad is not None and not torch.isfinite(p.grad).all()
+                       for p in m.parameters())
+        if bad_grad:
+            print(f"step {s+1}: grads non-finis -> step ignore", flush=True)
+            continue
         torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
         opt.step()
         if (s + 1) % 100 == 0 or s == 0 or s == a.steps - 1:
@@ -377,17 +424,19 @@ def cmd_train(a):
                 "steps": a.steps, "sec": sec, "params": nparam},
                os.path.join(OUT, tag + ".pt"))
     res = []
-    if os.path.exists(RESULTS):
+    if os.path.exists(RESULTS) and not os.environ.get("SPEAR_NORESULTS"):
         with open(RESULTS) as f:
             res = json.load(f)
-    res = [r for r in res if not (r["act"] == a.act and r.get("attn", "softmax") == a.attn
-                                  and r.get("seed", 1337) == a.seed and r.get("steps") == a.steps
-                                  and r.get("d", 96) == a.d and r.get("nl", 3) == a.nl)]
-    res.append(dict(act=a.act, attn=a.attn, seed=a.seed, steps=a.steps, d=a.d, nl=a.nl,
-                    val_loss=vl, ppl=math.exp(vl), sec=sec, params=nparam,
-                    ips=a.steps / sec))
-    with open(RESULTS, "w") as f:
-        json.dump(res, f, indent=2)
+    if not os.environ.get("SPEAR_NORESULTS"):
+        res = [r for r in res if not (r["act"] == a.act and r.get("attn", "softmax") == a.attn
+                                      and r.get("seed", 1337) == a.seed and r.get("steps") == a.steps
+                                      and r.get("d", 96) == a.d and r.get("nl", 3) == a.nl)]
+        res.append(dict(act=a.act, attn=a.attn, seed=a.seed, steps=a.steps, d=a.d, nl=a.nl,
+                        ternary=getattr(a, "ternary", False),
+                        val_loss=vl, ppl=math.exp(vl), sec=sec, params=nparam,
+                        ips=a.steps / sec))
+        with open(RESULTS, "w") as f:
+            json.dump(res, f, indent=2)
     print(f"DONE act={a.act} attn={a.attn} seed={a.seed} val={vl:.4f} ppl={math.exp(vl):.2f} time={sec:.0f}s")
 
 
@@ -480,7 +529,7 @@ def main():
     t.add_argument("--act", required=True,
                    choices=["silu", "gelu", "spear_silu", "spear_gelu", "spear_gelu2"])
     t.add_argument("--attn", default="softmax",
-                   choices=["softmax", "linear", "linearraw", "hybrid", "decayed"])
+                   choices=["softmax", "linear", "linearraw", "hybrid", "decayed", "delta"])
     t.add_argument("--ternary", action="store_true")
     t.add_argument("--no-sdpa", action="store_true", dest="nosdpa",
                    help="attention manuelle au lieu du kernel fusé SDPA")
