@@ -76,13 +76,34 @@ class SoftmaxAttn(nn.Module):
         self.proj = nn.Linear(d, d)
         self.use_sdpa = False
 
-    def forward(self, x, atts=None, knorms=None):
+    def forward(self, x, atts=None, knorms=None, cache=None):
         B, T, _ = x.shape
         q, k, v = self.qkv(x).split(self.d, dim=2)
         hd = self.d // self.h
         q = q.view(B, T, self.h, hd).transpose(1, 2)
         k = k.view(B, T, self.h, hd).transpose(1, 2)
         v = v.view(B, T, self.h, hd).transpose(1, 2)
+        if cache is not None:
+            # cache = slot mutable [None] puis [(k_past, v_past)] ; muté en place,
+            # évite de changer le type de retour pour les appelants existants.
+            past = cache[0]
+            if past is not None:
+                k = torch.cat([past[0], k], dim=2)
+                v = torch.cat([past[1], v], dim=2)
+            cache[0] = (k, v)
+            Tt = k.size(2)
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(hd))
+            if T < Tt:
+                # queries = positions les plus récentes : masquer seulement les
+                # clés futures ; cas T==1 (incrémental) -> masque vide.
+                mask = torch.triu(torch.ones(T, Tt, dtype=torch.bool, device=x.device),
+                                  Tt - T + 1)
+                att = att.masked_fill(mask, float("-inf"))
+            elif T == Tt:
+                mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=x.device), 1)
+                att = att.masked_fill(mask, float("-inf"))
+            y = att.softmax(-1) @ v
+            return self.proj(y.transpose(1, 2).contiguous().view(B, T, self.d))
         if getattr(self, "use_sdpa", False) and atts is None:
             y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
@@ -232,8 +253,10 @@ class Block(nn.Module):
         self.fc2 = nn.Linear(4 * d, d)
         self.act = act
 
-    def forward(self, x, atts=None, knorms=None):
-        x = x + self.attn(self.ln1(x), atts, knorms)
+    def forward(self, x, atts=None, knorms=None, cache=None):
+        h = self.ln1(x)
+        x = x + (self.attn(h, atts, knorms, cache) if cache is not None
+                 else self.attn(h, atts, knorms))
         return x + self.fc2(self.act(self.fc1(self.ln2(x))))
 
 
@@ -307,16 +330,50 @@ class GPT(nn.Module):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
-    def forward(self, idx, targets=None, atts=None, knorms=None):
+    def forward(self, idx, targets=None, atts=None, knorms=None, cache=None,
+                start_pos=0):
         B, T = idx.shape
-        x = self.wte(idx) + self.wpe(torch.arange(T, device=idx.device))
-        for blk in self.blocks:
-            x = blk(x, atts, knorms)
+        x = self.wte(idx) + self.wpe(torch.arange(start_pos, start_pos + T,
+                                                  device=idx.device))
+        for i, blk in enumerate(self.blocks):
+            x = blk(x, atts, knorms, None if cache is None else cache[i])
         logits = self.head(self.lnf(x))
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
+
+    @torch.no_grad()
+    def generate(self, prompt_ids, n_new, temperature=1.0):
+        """Prefill sur le prompt (cache par couche) puis 1 token/step avec cache.
+        Contexte glissant : au-delà de T tokens, éviction front du cache — les
+        clés évincées gardent leurs positions d'origine (approximation post-
+        saturation, les textes peuvent diverger du chemin naïf à ce moment)."""
+        Tmax = self.T
+        ctx = prompt_ids[:, -Tmax:]
+        caches = [[None] for _ in self.blocks]
+        logits, _ = self.forward(ctx, cache=caches)
+        out = ctx[0].tolist()
+        for i in range(n_new):
+            nxt = torch.multinomial(F.softmax(logits[:, -1, :] / temperature, -1), 1)
+            out.append(int(nxt.item()))
+            sp = ctx.size(1) + i + 1
+            if sp > Tmax - 1:
+                sp = Tmax - 1
+                for slot in caches:
+                    k, v = slot[0]
+                    slot[0] = (k[:, :, 1:, :], v[:, :, 1:, :])
+            logits, _ = self.forward(nxt, cache=caches, start_pos=sp)
+        return out
+
+
+@torch.no_grad()
+def kv_parity(m, ids):
+    """max|diff| entre forward full-séquence naïf et prefill incrémental."""
+    ref, _ = m(ids)
+    caches = [[None] for _ in m.blocks]
+    inc, _ = m(ids, cache=caches)
+    return (ref - inc).abs().max().item()
 
 
 # ---------------- data ----------------
@@ -466,12 +523,36 @@ def load_ckpt(path):
 def cmd_sample(a):
     _, _, _, itos = load_data()
     m, cfg = load_ckpt(a.ckpt)
-    idx = torch.tensor([[0]])  # '\n'
-    with torch.no_grad():
-        for _ in range(a.n):
-            logits, _ = m(idx[:, -cfg["T"]:])
-            idx = torch.cat([idx, torch.multinomial(F.softmax(logits[:, -1, :], -1), 1)], 1)
-    print("".join(itos[i] for i in idx[0].tolist()))
+    prompt = torch.tensor([[0]])  # '\n'
+
+    def naive():
+        idx = prompt.clone()
+        with torch.no_grad():
+            for _ in range(a.n):
+                logits, _ = m(idx[:, -cfg["T"]:])
+                idx = torch.cat([idx, torch.multinomial(F.softmax(logits[:, -1, :], -1), 1)], 1)
+        return idx
+
+    torch.manual_seed(a.seed)
+    t0 = time.perf_counter()
+    idx_n = naive()
+    t_naive = time.perf_counter() - t0
+    torch.manual_seed(a.seed)
+    t0 = time.perf_counter()
+    out_c = m.generate(prompt, a.n)
+    t_cache = time.perf_counter() - t0
+    diff = kv_parity(m, prompt[:, -cfg["T"]:])
+    print(f"[naive] {t_naive*1000:.0f} ms total | {t_naive/a.n*1000:.2f} ms/token")
+    print(f"[cache] {t_cache*1000:.0f} ms total | {t_cache/a.n*1000:.2f} ms/token")
+    print(f"SPEEDUP: {t_naive/t_cache:.2f}x")
+    print(f"parity max|diff| (full fwd vs prefill incrémental) = {diff:.3e}")
+    if 1 + a.n > cfg["T"]:
+        print(f"(note: fenêtre T={cfg['T']} saturée — cache = éviction front, "
+              f"les deux textes peuvent diverger après saturation)")
+    print("--- naive ---")
+    print("".join(itos[i] for i in idx_n[0].tolist()))
+    print("--- kv-cache ---")
+    print("".join(itos[i] for i in out_c))
 
 
 @torch.no_grad()
@@ -540,6 +621,7 @@ def main():
     s = sub.add_parser("sample")
     s.add_argument("--ckpt", required=True)
     s.add_argument("--n", type=int, default=400)
+    s.add_argument("--seed", type=int, default=0)
     sub.add_parser("kv")
     a = p.parse_args()
     dict(fetch=fetch, train=cmd_train, sample=cmd_sample, kv=cmd_kv)[a.cmd](a)

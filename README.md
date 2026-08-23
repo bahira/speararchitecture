@@ -224,8 +224,26 @@ détecté t=44 (1024 échantillons) · 76/80 ticks post-drift en alerte · W1 ma
 ### 5.7 KV-cache (éviction 50 %, masse d'attention future retenue)
 
 random ≈0.50 · fenêtre ≈0.40 · S seul 0.54–0.72 · **H2O (attention seule) 0.64–0.75** ·
-additif `4S+A+1.5R` 0.60–0.69 · multiplicatif `(A+R)(1+3S)` 0.58–0.67.
-Les règles tri-dimensionnelles atteignent le claim ~67 % du paper mais ne battent pas H2O pur.
+additif `4S+A+1.5R` 0.60–0.69 · multiplicatif `(A+R)(1+3S)` 0.58–0.67 · HoF `4.5S+A+R` 0.59–0.70.
+Les règles tri-dimensionnelles atteignent le claim ~67 % du paper mais ne battent pas H2O pur —
+et le fast-slot du Hall of Fame (« A » seul) confirme indépendamment ce verdict.
+
+### 5.8 Génération incrémentale (cache KV)
+
+`GPT.generate()` : prefill du prompt puis décodage 1 token/step avec cache K/V par couche
+(`python spear_llm.py sample` affiche les deux chemins côte à côte).
+Parité **bit-exact** entre forward naïf et prefill incrémental : max|diff| = 0.0.
+Sur ce CPU le micro-modèle est dominé par l'overhead de dispatch (~4 ms fixes par forward,
+T=1 coûte 4.2 ms vs T=128 à 9.7 ms) : gain mesuré **×1.14–1.92** selon la fenêtre, plafond
+théorique ~×2.3 ici — le ratio croît avec d/nl puisque le compute grandit et l'overhead non.
+
+### 5.9 Suite W1 : régressions de queue & localisation (`bench_w1_suite.py`)
+
+| Scénario | Preuve |
+|---|---|
+| « La moyenne ment » | latences A/B : moyenne **+11.6 %** (invisible) mais p99 **+61 %** ; W1 = 20.3 ms de masse déplacée capte la régression que la moyenne masque |
+| « Où est le drift ? » | 12 features, 3 dérivées injectées : le classement W1 par feature retrouve **exactement le top-3** (séparation ×25 entre dérivées et saines) |
+| Vitesse | D=2048 : **×9–17 vs scipy** selon la fenêtre, valeurs identiques au bit près |
 
 ## 6. Méthodologie
 

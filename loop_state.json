@@ -27,7 +27,8 @@
     {"n": 17, "depth": "L4", "work": "PROBE ADVERSE sur le claim x4.22 : mesure ENTRELACÉE 6 rounds -> médiane x1.37 seulement (la variance machine est x4 entre rounds) ; claim corrigé dans le README - la sonde attrape l'inflation de l'itération 15"},
     {"n": 18, "depth": "L4", "work": "AUDIT HALL OF FAME (hof_verify.py) : silu-HoF 2.2e-1, gelu-HoF 8e-2, phi-HoF 3.7e-2 (queue >1), softplus-HoF 1.23, tanh-HoF pente 1.96 -> 0 adoption, claims tous non-reproductibles ; ADOPTIONS : gate softsign exact (6u) au corpus ; règle KV 4.5S+A+R ex æquo de la nôtre et leur fast-slot 'A seul' confirme indépendamment H2O dominant"},
     {"n": 19, "depth": "L3", "work": "CAMPAGNE MULTI-SEEDS via sous-agent (seed 1338, threads partitionnés SPEAR_THREADS=2 + garde SPEAR_NORESULTS anti-race) : silu 3.0811 vs spear_silu 2.9626 -> l'algébrique gagne 2/2 seeds (Δ +0.029 puis +0.119) ; CLAIM HEADLINE DÉSORMAIS ROBUSTE"},
-    {"n": 20, "depth": "L3", "work": "DELTA-RULE (mur A tentative 4) : v1 NaN - état S non borné, feedback pred->erreur explosif ; v2 stable via clés L2-normalisées + beta<=0.80 + garde grads non-finis -> val 3.346, AUCUN gain court-T ; mur A reste à l'hybride 3.121, DeltaNet réel requiert chunkwise-parallel + échelle"}
+    {"n": 20, "depth": "L3", "work": "DELTA-RULE (mur A tentative 4) : v1 NaN - état S non borné, feedback pred->erreur explosif ; v2 stable via clés L2-normalisées + beta<=0.80 + garde grads non-finis -> val 3.346, AUCUN gain court-T ; mur A reste à l'hybride 3.121, DeltaNet réel requiert chunkwise-parallel + échelle"},
+    {"n": 21, "depth": "L3", "work": "DEUX SOUS-AGENTS PARALLÈLES : (A) génération cache KV incrémentale dans spear_llm.py - parité bit-exact diff=0.0, ×1.14-1.92 mesuré (overhead-dispatch-bound ~4ms fixes sur micro-modèle, plafond croît avec d/nl), kv+train-smoke intacts ; (B) bench_w1_suite.py : moyenne-cacheur (+12% vs p99 +61%, W1=20.3ms), LOCALISATION drift par ranking feature top-3/3 exact (séparation ×25), ×9-17 vs scipy valeurs identiques ; vérification indépendante du superviseur : PASS"}
   ],
   "bugs_fixed": [
     "dims codées en dur ignoraient --d/--nl (relance involontaire d=96 = preuve déterminisme bonus)",
@@ -59,7 +60,9 @@
     "sdpa_fused_attention": "VALIDE avec correction adverse - gain réel mais x1.37 médian entrelacé (claim initial x4.22 inflation de fenêtre, corrigé itération 17)",
     "linear_attention_hybrid": "PARTIEL - val 3.121, ~60% de l'écart récupéré au même budget",
     "multi_seed_validation": "VALIDE - spear_silu bat F.silu sur 2/2 seeds indépendantes (Δ +0.029 / +0.119)",
-    "delta_rule_attention": "ÉCHEC documenté - stable après clés L2 + beta cap, mais zéro gain qualité court-T (3.346 vs linéaire 3.347)"
+    "delta_rule_attention": "ÉCHEC documenté - stable après clés L2 + beta cap, mais zéro gain qualité court-T (3.346 vs linéaire 3.347)",
+    "kv_cached_generation": "VALIDE - parité bit-exact diff=0.0, ×1.14-1.92 overhead-bound sur micro-modèle (croît à l'échelle)",
+    "w1_localization": "VALIDE - ranking W1 localise le drift feature-par-feature : top-3/3 retrouvé, séparation ×25"
   },
   "convergence": "PROVISIONAL - tous les gaps typés résolus ou documentés comme limites honnêtes ; murs restants : qualité attention linéaire courte-T, ternaire nécessite QAT"
 }
